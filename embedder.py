@@ -16,16 +16,20 @@ class embedder:
     def __init__(self, args):
         self.args = args
 
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
-        self.device = f'cuda:{args.device}' if torch.cuda.is_available() else "cpu"
-        torch.cuda.set_device(self.device)
+        self.device =torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         self.config_str = config2string(args)
         print("\n[Config] {}\n".format(self.config_str))
 
 
         self.path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', self.args.dataset)
-        self.hidden_layers = eval(self.args.layers)
+
+        if  self.args.layers == 1:
+            self.hidden_layers = [self.args.dim]
+        elif self.args.layers == 2:
+            self.hidden_layers=[self.args.dim,self.args.dim]
+        elif self.args.layers == 3:
+            self.hidden_layers = [self.args.dim, self.args.dim,self.args.dim]
         # dataset
         # path = osp.join(osp.dirname(osp.realpath(__file__)), 'data', args.dataset)
         # if args.dataset == 'Cora' or args.dataset == 'CiteSeer' or args.dataset == 'PubMed':
@@ -179,21 +183,35 @@ class embedder:
             self.best_val = 0
 
 
+
     def summary(self):
+        if len(self.train_accs) == 1:
+            train_acc_mean = self.train_accs[0]
+            val_acc_mean = self.valid_accs[0]
+            test_acc_mean = self.test_accs[0]
 
-        train_acc_mean = statistics.mean(self.train_accs)
+            val_f1_mean = self.valid_f1[0]
+            test_f1_mean = self.test_f1[0]
+            test_bacc_mean = self.test_baccs[0]
 
-        val_acc_mean = statistics.mean(self.valid_accs)
-        test_acc_mean = statistics.mean(self.test_accs)
+            acc_CI = 0
+            bacc_CI = 0
+            f1_CI = 0
 
-        val_f1_mean = statistics.mean(self.valid_f1)
-        test_f1_mean = statistics.mean(self.test_f1)
+        else:
+            train_acc_mean = statistics.mean(self.train_accs)
+            val_acc_mean = statistics.mean(self.valid_accs)
+            test_acc_mean = statistics.mean(self.test_accs)
 
-        test_bacc_mean =statistics.mean(self.test_baccs)
+            val_f1_mean = statistics.mean(self.valid_f1)
+            test_f1_mean = statistics.mean(self.test_f1)
+            test_bacc_mean =statistics.mean(self.test_baccs)
 
-        acc_CI = (statistics.stdev(self.test_accs) / (self.args.repetitions ** (1 / 2)))
-        bacc_CI = (statistics.stdev(self.test_baccs) / (self.args.repetitions ** (1 / 2)))
-        f1_CI = (statistics.stdev(self.test_f1) / (self.args.repetitions ** (1 / 2)))
+            acc_CI = (statistics.stdev(self.test_accs) / (self.args.repetitions ** (1 / 2)))
+            bacc_CI = (statistics.stdev(self.test_baccs) / (self.args.repetitions ** (1 / 2)))
+            f1_CI = (statistics.stdev(self.test_f1) / (self.args.repetitions ** (1 / 2)))
 
-        print("** | test acc : {:.2f} +- {:.2f} | test bacc : {:.2f} +- {:.2f} | test f1 : {:.2f} +- {:.2f} |val acc: {:.2f} |val f1: {:.2f} |train acc: {:.2f} | **\n".format(
-            test_acc_mean, acc_CI, test_bacc_mean,bacc_CI,test_f1_mean,f1_CI,val_acc_mean,val_f1_mean, train_acc_mean))
+        log= "** | test acc : {:.2f} +- {:.2f} | test bacc : {:.2f} +- {:.2f} | test f1 : {:.2f} +- {:.2f} |val acc: {:.2f} |val f1: {:.2f} |train acc: {:.2f} | **\n".format(
+            test_acc_mean, acc_CI, test_bacc_mean,bacc_CI,test_f1_mean,f1_CI,val_acc_mean,val_f1_mean, train_acc_mean)
+        print(log)
+

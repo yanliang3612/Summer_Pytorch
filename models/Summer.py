@@ -4,8 +4,10 @@ from torch.optim import Adam
 import torch.nn.functional as F
 import numpy as np
 from copy import deepcopy
-from src.utils import reset, set_random_seeds
-#masking
+from src.utils import reset, set_random_seeds, random_seed
+from src.loss_function import My_loss, My_end_loss
+from src.rbo import rbo_score
+# masking
 from sklearn.cluster import KMeans
 from embedder import embedder
 from torch_geometric.utils import to_dense_adj
@@ -34,32 +36,35 @@ class Summer_Trainer(embedder):
 
         if self.args.dataset == 'Cora' or self.args.dataset == 'CiteSeer' or self.args.dataset == 'PubMed':
             self.data = \
-            Planetoid(self.path, self.args.dataset, transform=T.NormalizeFeatures(), split='public', ratio=self.args.imb_ratio)[0].to(
-                self.device)
-        elif self.args.dataset == 'Computers' or self.args.dataset == 'Photo':
+                Planetoid(self.path, self.args.dataset, transform=T.NormalizeFeatures(), split='public',
+                          ratio=self.args.imb_ratio)[0].to(
+                    self.device)
+        elif self.args.dataset == 'Computers':
             print("wait")
         self.train_mask, self.val_mask, self.test_mask = self.data.train_mask, self.data.val_mask, self.data.test_mask
 
-
         self.labels = deepcopy(self.data.y)
         self.running_train_mask = deepcopy(self.train_mask)
-        eta = self.data.num_nodes / (to_dense_adj(self.data.edge_index).sum() / self.data.num_nodes)**len(self.hidden_layers)
-        self.t = (self.labels[self.train_mask].unique(return_counts=True)[1]*3*eta/len(self.labels[self.train_mask])).type(torch.int64)
+        eta = self.data.num_nodes / (to_dense_adj(self.data.edge_index).sum() / self.data.num_nodes) ** len(
+            self.hidden_layers)
+        self.t = (self.labels[self.train_mask].unique(return_counts=True)[1] * 3 * eta / len(
+            self.labels[self.train_mask])).type(torch.int64)
         self.t = self.t / self.args.rounds
-        self.t[:4] = int(4)
-        self.t[-3:] = int(4)
-        # self.t[-1] = self.t[0]+int(6)
-
+        self.t[:4] = self.args.ad
+        self.t[-3:] = self.args.ad
 
 
     def pretrain(self, mask, round):
-        #先把模型按照原来的数据集训练200个epoch
+        # 先把模型按照原来的数据集训练200个epoch
         for epoch in range(200):
             self.model.train()
             self.optimizer.zero_grad()
 
             logits, _ = self.model.cls(self.data)
+
             loss = F.cross_entropy(logits[self.running_train_mask], self.labels[self.running_train_mask])
+            # loss = My_loss(logits, self.labels, round, self.data, self.running_train_mask, self.args).loss()
+            # loss = My_end_loss(logits, self.labels, self.data, self.running_train_mask, self.args).loss()
 
             # if  rounds == 0:
             #     alpha = [1, 1, 1, 1, 20, 20, 20]
@@ -73,26 +78,27 @@ class Summer_Trainer(embedder):
             loss.backward()
             self.optimizer.step()
 
-            st = '[Repetitions : {}][Rounds : {}/{}][Epoch {}/{}] Loss: {:.4f}'.format(mask+1, round+1, self.args.rounds, epoch+1, 200, loss.item())
+            st = '[Repetitions : {}][Rounds : {}/{}][Epoch {}/{}] Loss: {:.4f}'.format(mask + 1, round + 1,
+                                                                                       self.args.rounds, epoch + 1, 200,
+                                                                                       loss.item())
             print(st)
 
-
-        #如果用聚类的话
+        # 如果用聚类的话
         if self.args.clustering:
             # Clustering
             self.model.eval()
             rep = self.model.encoder(self.data).detach()
-            #归一化操作
+            # 归一化操作
             rep = F.normalize(rep, dim=1)
             rep = rep.to('cpu').numpy()
-            #得到每一个点的聚类结果
+            # 得到每一个点的聚类结果
             clustering = KMeans(n_clusters=self.args.num_K).fit(rep)
             clustering_result = clustering.predict(rep)
 
             # Pseudo tags
             labeled_centroid_list = []
             for m in range(self.num_classes):
-                m_mask = torch.logical_and(self.labels==m, self.running_train_mask).to('cpu')
+                m_mask = torch.logical_and(self.labels == m, self.running_train_mask).to('cpu')
                 m_rep = rep[m_mask]
                 m_centroid = m_rep.mean(0)
                 labeled_centroid_list.append(m_centroid)
@@ -106,36 +112,35 @@ class Summer_Trainer(embedder):
             if num_cluster != self.args.num_K:
                 print("Empty cluster is occured")
             for l in clusters:
-                l_mask = torch.logical_and(torch.tensor(clustering_result==l).to(self.args.device), ~self.running_train_mask).to('cpu')
+                l_mask = torch.logical_and(torch.tensor(clustering_result == l).to(self.device),
+                                           ~self.running_train_mask).to('cpu')
                 l_rep = rep[l_mask]
                 l_centroid = l_rep.mean(0)
-                distance = (labeled_centroids - l_centroid)**2
+                distance = (labeled_centroids - l_centroid) ** 2
                 distance = distance.sum(1)
                 pseudo_label = np.argmin(distance)
                 pseudo_labels[l_mask] = pseudo_label
-            assert (pseudo_labels[~self.running_train_mask.to('cpu')]==-1).sum() == 0
-
+            assert (pseudo_labels[~self.running_train_mask.to('cpu')] == -1).sum() == 0
 
         # Pseudo-labeling
         self.model.eval()
         logits, _ = self.model.cls(self.data)
         predictions = F.softmax(logits, dim=1)
         if self.args.clustering:
-            y_train, self.running_train_mask = self.selftraining_with_checking(predictions, pseudo_labels)
+            y_train, self.running_train_mask = self.UNREAL(predictions, pseudo_labels,rep,labeled_centroids)
         else:
-            y_train, self.running_train_mask = self.selftraining(predictions)
+            pass
         self.labels[self.running_train_mask] = torch.argmax(y_train[self.running_train_mask], dim=1)
 
 
 
 
     def train(self):
-        
+
         for repetition in range(self.args.repetitions):
-            set_random_seeds(repetition)
+            set_random_seeds(random_seed(repetition))
             # self.train_mask, self.val_mask, self.test_mask = masking(fold, self.data)
             self._init_dataset()
-
 
             input_size = self.data.x.size(1)
             rep_size = self.hidden_layers[-1]
@@ -146,21 +151,24 @@ class Summer_Trainer(embedder):
             self.encoder = GNN([input_size] + self.hidden_layers)
             self.classifier = Classifier(rep_size, self.num_classes)
 
-
             for round in range(self.args.rounds):
                 self._init_model()
                 self.pretrain(repetition, round)
 
-            for epoch in range(1,self.args.epochs+1):
+            for epoch in range(1, self.args.epochs + 1):
                 self.model.train()
                 self.optimizer.zero_grad()
 
                 logits, _ = self.model.cls(self.data)
                 loss = F.cross_entropy(logits[self.running_train_mask], self.labels[self.running_train_mask])
+
+                # loss = My_end_loss(logits, self.labels,self.data, self.running_train_mask, self.args).loss()
+
                 loss.backward()
                 self.optimizer.step()
 
-                st = '[Repetitions : {}][Epoch {}/{}] Loss: {:.4f}'.format(repetition+1, epoch, self.args.epochs, loss.item())
+                st = '[Repetitions : {}][Epoch {}/{}] Loss: {:.4f}'.format(repetition + 1, epoch, self.args.epochs,
+                                                                           loss.item())
 
                 # evaluation
                 self.evaluate(self.data, st)
@@ -173,29 +181,92 @@ class Summer_Trainer(embedder):
 
 
 
-    def selftraining_with_checking(self, predictions, pseudo_labels):
+
+    def UNREAL(self, predictions, pseudo_labels,rep,labeled_centroids):
         new_gcn_index = torch.argmax(predictions, dim=1)
         confidence = torch.max(predictions, dim=1)[0]
+        confidence_cpu = confidence.detach().to('cpu').numpy()
         sorted_index = torch.argsort(-confidence)
         y_train = F.one_hot(self.labels).float()
         y_train[~self.running_train_mask] = 0
         no_class = y_train.shape[1]
         assert len(self.t) >= no_class
-        index = []
-        count = [0 for i in range(no_class)]
-        for i in sorted_index:
+        # index = []
+        # count = [0 for i in range(no_class)]
+        # for i in sorted_index:
+        #     for j in range(no_class):
+        #         if new_gcn_index[i] == j and count[j] < self.t[j] and not self.running_train_mask[i]:
+        #             index.append(i.item())
+        #             count[j] += 1
+        index_list = []
+        distance_list = []
+        confidence_list = []
+
+        soft_label_dif_list = []
+
+        for j in range(no_class):
+            index_list.append([])
+
+        for l in range(len(new_gcn_index)):
             for j in range(no_class):
-                if new_gcn_index[i] == j and count[j] < self.t[j] and not self.running_train_mask[i]:
-                    index.append(i.item())
-                    count[j] += 1
-        filtered_index = []
-        deleted_index = []
-        for i in index:
-            if pseudo_labels[i] == new_gcn_index[i].item():
-                filtered_index.append(i)
+                if pseudo_labels[l] == j and new_gcn_index[l] == j and not self.running_train_mask[l]:
+                    index_list[j].append(l)
+                else:
+                    soft_label_dif_list.append(l)
+
+        for j in range(no_class):
+            rep_j = rep[index_list[j]]
+            distance = (rep_j - labeled_centroids[j]) ** 2
+            distance = distance.sum(1)
+            distance_list.append(distance)
+
+        for j in range(no_class):
+            confidence_list.append(confidence_cpu[index_list[j]])
+
+        new_ranks_index_list = []
+        rbo_score_list = []
+        for j in range(no_class):
+            temp_confidence = confidence_list[j].argsort()[::-1]
+            ranks_confidence = temp_confidence.argsort()
+            temp_distance = distance_list[j].argsort()
+            ranks_distance = temp_distance.argsort()
+            rbo = rbo_score(ranks_confidence, ranks_distance, self.args.rbo)
+            rbo_score_list.append(rbo)
+            if rbo >= 0.5:
+                new_ranks = rbo * ranks_distance + (1 - rbo) * ranks_confidence
             else:
-                deleted_index.append(i)
-        
+                new_ranks = (1 - rbo) * ranks_distance + rbo * ranks_confidence
+            new_ranks_index = new_ranks.argsort()
+            new_ranks_index_list.append(new_ranks_index)
+
+        selcted_index = []
+        new_count = [0 for i in range(no_class)]
+        deleted_index = []
+
+        for j in range(no_class):
+            for i in np.array(index_list[j])[new_ranks_index_list[j]]:
+                if new_count[j] < self.t[j]:
+                    node_distance = (rep[i] - labeled_centroids) ** 2
+                    node_distance = node_distance.sum(1)
+                    node_distance_index = node_distance.argsort()
+                    m = node_distance_index[0];
+                    n = node_distance_index[1]
+                    if (node_distance[n] - node_distance[m]) / node_distance[m] > self.args.threshold:
+                        selcted_index.append(i.item())
+                        new_count[j] += 1
+                    else:
+                        deleted_index.append(i.item())
+                else:
+                    break
+
+        filtered_index = selcted_index
+        deleted_index = []
+        # for i in index:
+        #     if pseudo_labels[i] == new_gcn_index[i].item():
+        #         filtered_index.append(i)
+        #     else:
+        #         deleted_index.append(i)
+
         indicator = torch.zeros(self.train_mask.shape, dtype=torch.bool)
         indicator[filtered_index] = True
         indicator = torch.logical_and(torch.logical_not(self.running_train_mask), indicator.to(self.device))
@@ -207,38 +278,6 @@ class Summer_Trainer(embedder):
         train_mask[indicator] = 1
         y_train[indicator] = prediction[indicator]
         return y_train, train_mask
-
-
-
-
-    def selftraining(self, predictions):
-        new_gcn_index = torch.argmax(predictions, dim=1)
-        confidence = torch.max(predictions, dim=1)[0]
-        sorted_index = torch.argsort(-confidence)
-        
-        y_train = F.one_hot(self.labels).float()
-        y_train[~self.running_train_mask] = 0
-        no_class = y_train.shape[1]  # number of class
-        assert len(self.t) >= no_class
-        index = []
-        count = [0 for i in range(no_class)]
-        for i in sorted_index:
-            for j in range(no_class):
-                if new_gcn_index[i] == j and count[j] < self.t[j] and not self.running_train_mask[i]:
-                    index.append(i)
-                    count[j] += 1
-        indicator = torch.zeros(self.train_mask.shape, dtype=torch.bool)
-        indicator[index] = True
-        indicator = torch.logical_and(torch.logical_not(self.running_train_mask), indicator.to(self.device))
-        prediction = torch.zeros(predictions.shape).to(self.device)
-        prediction[torch.arange(len(new_gcn_index)), new_gcn_index] = 1.0
-        prediction[self.running_train_mask] = y_train[self.running_train_mask]
-        y_train = deepcopy(y_train)
-        train_mask = deepcopy(self.running_train_mask)
-        train_mask[indicator] = 1
-        y_train[indicator] = prediction[indicator]
-        return y_train, train_mask
-
 
 
 
@@ -264,12 +303,9 @@ class Summer(nn.Module):
         reset(self.classifier)
 
 
-
 def sample_mask(idx, l):
     """Create mask."""
     mask = torch.zeros(l)
     mask[idx] = 1
     return torch.as_tensor(mask, dtype=torch.bool)
-
-
 

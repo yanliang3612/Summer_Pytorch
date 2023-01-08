@@ -4,6 +4,10 @@ import random
 import numpy as np
 import torch
 from sklearn.metrics import balanced_accuracy_score, f1_score
+from src.args import parse_args
+args = parse_args()
+
+
 
 def set_random_seeds(random_seed=0):
     r"""Sets the seed for generating random numbers."""
@@ -15,12 +19,25 @@ def set_random_seeds(random_seed=0):
     random.seed(random_seed)
 
 
+
+
+def random_seed(repetition):
+    if args.dataset == "Cora" or args.dataset == "CiteSeer":
+        return int(repetition*10+1)
+    elif args.dataset == "PubMed" or args.dataset == "Computers":
+        return int(repetition)
+
+
+
+
 def reset(value):
     if hasattr(value, 'reset_parameters'):
         value.reset_parameters()
     else:
         for child in value.children() if hasattr(value, 'children') else []:
             reset(child)
+
+
 
 
 def create_dirs(dirs):
@@ -120,3 +137,4 @@ def compute_representation(net, data, device):
     reps = torch.cat(reps, dim=0)
 
     return reps
+
